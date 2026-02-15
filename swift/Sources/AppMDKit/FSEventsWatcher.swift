@@ -99,9 +99,12 @@ public final class FSEventsWatcher: @unchecked Sendable {
             // Only care about .md files
             guard url.pathExtension == "md" else { continue }
 
-            // Skip hidden files and cache
-            let components = url.pathComponents
-            if components.contains(where: { $0.hasPrefix(".") }) { continue }
+            // Skip hidden files and cache — only check path components BELOW the watch root
+            // (the root path itself may contain dot-prefixed dirs like .agentic)
+            let rootComponents = watchURL.standardizedFileURL.pathComponents
+            let fileComponents = url.standardizedFileURL.pathComponents
+            let relativeComponents = Array(fileComponents.dropFirst(rootComponents.count))
+            if relativeComponents.contains(where: { $0.hasPrefix(".") }) { continue }
 
             let eventFlags = flags[i]
 

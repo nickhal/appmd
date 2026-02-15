@@ -136,6 +136,9 @@ public final class AppMDIndex: @unchecked Sendable {
         for (fileURL, modified) in files {
             try indexFile(at: fileURL, modified: modified)
         }
+
+        // Remove stale entries for files that no longer exist on disk
+        try cleanupDeletedFiles()
     }
 
     // MARK: - Incremental Index
