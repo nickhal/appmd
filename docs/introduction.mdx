@@ -1,0 +1,77 @@
+---
+title: "What is AppMD?"
+description: "Markdown files as the data layer for native apps"
+---
+
+# What is AppMD?
+
+AppMD is an open standard that uses **markdown files with YAML frontmatter** as the data layer for native apps. Every piece of user data is a plain `.md` file — readable in any text editor, any markdown tool, any AI agent.
+
+A schema file (`_schema.yaml`) defines types and fields. A derived SQLite index makes queries fast. But the files are always the source of truth. Delete the index, rebuild from files, zero data loss.
+
+## Why AppMD?
+
+<CardGroup cols={2}>
+  <Card title="Own Your Data" icon="hard-drive">
+    Files on your machine. No cloud, no account, no server. Your data stays yours.
+  </Card>
+  <Card title="No Vendor Lock-in" icon="lock-open">
+    Your data is plain text. It outlives any app, any company, any platform.
+  </Card>
+  <Card title="AI-Native" icon="robot">
+    Agents read and write markdown naturally. No API, no SDK — just files.
+  </Card>
+  <Card title="Human-Readable" icon="eye">
+    Open any data file in any text editor. It just works.
+  </Card>
+</CardGroup>
+
+## How It Works
+
+```
+User data lives as .md files
+        ↓
+_schema.yaml defines the structure
+        ↓
+AppMDKit builds a derived SQLite index (fast queries)
+        ↓
+FSEvents watches for changes (real-time updates)
+        ↓
+Edit a file anywhere → app updates instantly
+```
+
+The magic: edit a file in VS Code, Obsidian, vim, or any tool — your app updates in real time. The file is always the source of truth. The index is disposable.
+
+## Quick Example
+
+**Schema** (`_schema.yaml`):
+```yaml
+name: Journal
+version: 1
+
+Entry:
+  date: date
+  mood?: happy | sad | neutral | focused | anxious
+  tags?: [string]
+  body: text
+```
+
+**Data file** (`2026-02-13.md`):
+```markdown
+---
+type: Entry
+title: Morning Hike
+date: 2026-02-13
+mood: happy
+tags: [outdoors, exercise]
+---
+
+Hiked the coastal trail at sunrise. The fog was rolling in
+over the cliffs and it felt like walking through clouds.
+```
+
+**That's it.** A schema and some markdown files. AppMDKit handles the rest.
+
+<Card title="Build Your First App" icon="rocket" href="/docs/guide">
+  Follow the step-by-step guide to build an AppMD-powered app.
+</Card>
