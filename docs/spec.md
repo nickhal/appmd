@@ -1,6 +1,6 @@
 # AppMD Specification
 
-**Version 0.1 · Draft**
+**Version 1.0**
 
 AppMD (Application Markdown) is a set of conventions for using standard markdown and YAML as the data layer for applications. Every AppMD file is valid markdown. Every AppMD schema is valid YAML. There is no new format to learn — just conventions on top of what you already know.
 
@@ -25,6 +25,20 @@ An LLM reads markdown natively. An agent discovers your data by reading files. N
 
 **6. Simplicity wins.**
 Markdown won by what it left out, not what it included. AppMD follows the same principle.
+
+**7. Data completeness over aesthetics.**
+AppMD files serve three audiences in priority order:
+1. **Applications** — parsing data programmatically
+2. **AI agents / LLMs** — reading and writing data naturally
+3. **Humans** — inspecting, editing, or migrating data when needed
+
+Data completeness takes priority over markdown aesthetics:
+- All temporal values use full ISO 8601 with timezone offset: `2026-02-15T12:39:00+08:00`
+- No data is omitted for visual cleanliness
+- Fields are not simplified or truncated for readability
+- The file is a complete data record that could reconstruct the application state
+
+Humans chose AppMD because they want data ownership and portability — not because the files look pretty. Complete data they own is better than pretty data they don't.
 
 ---
 
@@ -106,6 +120,37 @@ Every document has a `type` field in its frontmatter that points to a type defin
 
 The markdown body maps to the `text` type in the schema. If the schema declares `body: text`, that's the file's markdown content below the frontmatter.
 
+### Document Identity
+
+Documents MAY include an `id` field in frontmatter. If present, `id` is the document's stable unique identifier within its type.
+
+```yaml
+---
+type: Category
+id: groceries
+name: Groceries & Food
+---
+```
+
+- `id` takes priority over filename for reference resolution (see [Ref Field Type](#ref-field-type))
+- `id` survives file renames — references using `id` do not break when the file is renamed
+- If `id` is absent, the filename without extension serves as the implicit identifier
+- The filename could be `groceries.md`, `01-groceries.md`, or anything — refs resolve on `id: groceries`
+- `id` values MUST be unique within a document type
+- `id` is a reserved field name (see [Reserved Names](#reserved-names))
+
+### File Naming
+
+- The filename (without `.md` extension) serves as the document's implicit identifier when no `id` field is present
+- Filenames MUST be unique within the data directory
+- Filenames MUST end in `.md`
+- Filenames MUST contain only filesystem-safe characters
+- No naming convention is enforced. Recommended patterns:
+  - Time-series data (journal entries, daily logs): `2026-02-15.md`
+  - Named entities (categories, people): `groceries.md`, `nick.md`
+  - Programmatic creation: `a1b2c3d4.md` (UUID or short hash)
+  - Titled content (notes, bookmarks): `morning-hike.md` (slugified title)
+
 ### Records
 
 Records are primarily structured — a transaction, a habit log, a contact. Two patterns:
@@ -154,7 +199,7 @@ The schema declares which pattern a type uses. The developer or user picks the o
 
 ## Schema Files
 
-Every app has a `_schema.yaml` in its root directory. It defines the types, fields, and constraints for that app's data.
+Every app MUST have a schema file named `_schema.yaml` at the root of its data directory. The underscore prefix signals it is a framework file, not user data. It defines the types, fields, and constraints for that app's data.
 
 ### Basic Structure
 
@@ -191,9 +236,11 @@ A schema file has:
 |------|-------------|---------|
 | `string` | Short text | `"Feeka Coffee"` |
 | `text` | Long text / markdown body | The file's markdown content |
-| `number` | Integer or decimal | `42`, `-4.50` |
+| `int` | Integer | `42`, `-3` |
+| `float` | Decimal number | `-4.50`, `1.5` |
+| `number` | Integer or decimal (alias) | `42`, `-4.50` |
 | `date` | ISO 8601 date | `2026-02-13` |
-| `datetime` | ISO 8601 datetime | `2026-02-13T09:30:00` |
+| `datetime` | ISO 8601 datetime with timezone | `2026-02-13T09:30:00+08:00` |
 | `boolean` | True or false | `true`, `false` |
 
 **Compound types:**
@@ -203,6 +250,8 @@ A schema file has:
 | `[type]` | List of a type | `[string]` → `[coffee, social]` |
 | `val1 \| val2 \| val3` | Enum — one of the listed values | `food \| transport \| groceries` |
 | `-> EntityName` | Relationship to another entity | `-> Account` |
+| `ref` | Typed reference to another document type | See [Ref Field Type](#ref-field-type) |
+| `object` | Nested object (one level) | See [Object Field Type](#object-field-type) |
 
 **Modifiers:**
 
@@ -210,6 +259,79 @@ A schema file has:
 |--------|---------|---------|
 | `?` suffix | Optional field | `merchant?: string` |
 | `= value` | Default value | `currency: string = USD` |
+
+#### Ref Field Type
+
+The `ref` type declares a relationship to another document type. In the schema, use `type: ref` with `to: TypeName` specifying the target type:
+
+```yaml
+Transaction:
+  fields:
+    amount: float
+    date: datetime
+    category:
+      type: ref
+      to: Category
+```
+
+- The value in frontmatter is a string that resolves to the target document
+- Resolution order: match against `id` field of target documents first, then filename (without extension) as fallback
+- If the referenced document does not exist, the reference is stored as a broken reference (NULL in joins)
+- Implementations MUST NOT reject documents with broken references. Broken references are warnings, not errors. This follows AppMD's permissive validation philosophy.
+
+Example frontmatter:
+
+```yaml
+---
+type: Transaction
+amount: -45.00
+date: 2026-02-15T12:39:00+08:00
+category: groceries
+---
+```
+
+Here `groceries` resolves first by checking for a `Category` document with `id: groceries`, then by checking for a file named `groceries.md` in the Category data directory.
+
+#### Object Field Type
+
+The `object` type supports one level of nesting in YAML frontmatter. In the schema, use `type: object` with a `fields` sub-definition:
+
+```yaml
+Contact:
+  fields:
+    name: string
+    address:
+      type: object
+      fields:
+        street: string
+        city: string
+        country: string
+```
+
+Example frontmatter:
+
+```yaml
+---
+type: Contact
+name: Nick
+address:
+  street: 123 Main St
+  city: Johor
+  country: Malaysia
+---
+```
+
+- In the derived index, nested fields are flattened using dot notation: `address.street`, `address.city`, `address.country`
+- Queries use dot notation: `WHERE "address.city" = 'Johor'`
+- Maximum nesting depth for v1: **ONE level**. Deeper nesting is not supported. Use separate document types with `ref` fields for deeper relationships.
+
+#### Null and Optional Fields
+
+- Optional fields are marked with `?` suffix in the schema: `mood?: happy | sad | neutral`
+- If an optional field is absent from a document's frontmatter, it is stored as NULL in the index
+- Queries can filter on NULL: "all entries without a mood" = `WHERE mood IS NULL`
+- Required fields (no `?` suffix) that are missing from frontmatter: the document still parses and indexes, but implementations MAY emit a validation warning. Implementations MUST NOT reject the document.
+- Empty string `""` is distinct from NULL/missing. A field set to `""` is present but empty.
 
 ### Field Declarations
 
@@ -376,6 +498,118 @@ The arrow tells tooling and agents: "this field is a link to another entity, not
 - **Subfolders for entity types.** `accounts/`, `transactions/`, `habits/`. These map to types defined in the schema.
 - **File naming is free-form.** Use what makes sense: dates for journal entries (`2026-02-13.md`), slugs for entities (`alex-chen.md`), year-month for collection files (`2026-02.md`).
 - **No hidden files for data.** AppMD data is always visible. Derived caches (like SQLite indexes) live in hidden folders (`.cache/`) and are always deletable.
+
+---
+
+## Attachments
+
+Convention for binary files (images, PDFs, etc.) associated with a document:
+
+- Attachments live in a sibling folder with the same name as the document (without `.md` extension)
+- Referenced using standard markdown relative paths
+- Example structure:
+
+```
+data/
+├── 2026-02-15-morning-hike.md
+└── 2026-02-15-morning-hike/
+    ├── photo-001.jpg
+    └── map.png
+```
+
+- In the document body: `![Trail photo](./2026-02-15-morning-hike/photo-001.jpg)`
+- The data directory is the portable unit. Copy the entire directory to preserve all references.
+- Implementations SHOULD NOT embed binary data (e.g., base64) in the markdown body.
+
+---
+
+## Reserved Names
+
+The entire `_` prefix namespace is reserved for AppMD internals. Users MUST NOT define frontmatter fields starting with `_`.
+
+Currently reserved names:
+
+| Name | Purpose |
+|------|---------|
+| `type` | Links the document to its schema type definition (required on every document) |
+| `id` | Optional stable unique identifier (see [Document Identity](#document-identity)) |
+| `_body` | Reserved for index; the markdown body content |
+| `_path` | Reserved for index; the document's relative file path |
+| `_modified` | Reserved for index; the file's last modification timestamp |
+
+`type` and `id` are the only non-underscore reserved names. The `_` prefix reservation allows AppMD to add internal fields in future versions without breaking existing schemas.
+
+---
+
+## Multi-File Writes
+
+For operations that modify multiple documents atomically (e.g., transferring a balance between two accounts), AppMD uses a write-ahead log pattern:
+
+1. Write an operation file to the `.pending/` directory describing all intended writes:
+
+```markdown
+---
+type: _Operation
+status: pending
+created: 2026-02-15T12:00:00+08:00
+writes:
+  - file: checking.md
+    set:
+      balance: 1400.00
+  - file: savings.md
+    set:
+      balance: 550.00
+---
+Transfer $50 from checking to savings
+```
+
+2. Execute each file write sequentially (atomic per-file via tmp + rename)
+3. Delete the operation file from `.pending/`
+
+On recovery (application startup):
+- Scan `.pending/` for incomplete operation files
+- Complete the remaining writes, or roll back by restoring from the operation's original values
+- Delete the operation file after resolution
+
+The `.pending/` directory is framework infrastructure, not user data:
+- It is NOT indexed by the derived index
+- It SHOULD be excluded from version control (add to `.gitignore`)
+- It SHOULD be treated like `.cache/` — temporary, deletable, auto-managed
+- Operation files use the `_Operation` type prefix (underscore = reserved)
+
+State files (e.g., `checking.md`) always contain current, human-readable values. The WAL exists only for crash recovery.
+
+---
+
+## Schema Evolution
+
+AppMD schemas are permissive. Migration is handled by convention, not tooling:
+
+- **Adding an optional field** to the schema: existing documents are valid. The new field is NULL in the index for old documents.
+- **Adding a required field**: existing documents still parse and index. Implementations MAY emit a validation warning but MUST NOT reject the document.
+- **Removing a field** from the schema: existing documents retain the field in their frontmatter. The index ignores fields not in the current schema.
+- **Renaming a field**: treated as removing old + adding new. Existing documents retain the old field name.
+- The `version` field in `_schema.yaml` is informational. Implementations do not enforce version-based migration logic.
+- No migration scripts are needed. This is a deliberate design choice — schema evolution should be frictionless for personal apps.
+
+---
+
+## Patterns & Recommendations
+
+### Ordering
+
+For ordered collections (todo lists, playlists, kanban boards), use a `position` field:
+
+```yaml
+Task:
+  fields:
+    title: string
+    status: string
+    position: float
+```
+
+- Use `float` type, not `int`. Inserting between position 1.0 and 2.0 = set position 1.5, without rewriting other documents.
+- This is a schema convention, not a framework feature. The implementation sorts on the `position` field like any other query.
 
 ---
 

@@ -2,7 +2,7 @@
 
 **The definitive, self-contained reference for building apps with AppMD.**
 
-*Last updated: 2025-07-28 · AppMD Spec v0.1 · AppMDKit (Swift)*
+*Last updated: 2025-07-28 · AppMD Spec v1.0 · AppMDKit (Swift)*
 
 ---
 
@@ -121,6 +121,8 @@ Entry:
 | `val1 \| val2 \| val3` | Enum (one of listed values) | `food \| transport \| groceries` |
 | `-> EntityName` | Relationship (wiki link) | `-> Account` |
 | `[-> EntityName]` | List of relationships | `[-> Contact]` |
+| `ref` (with `to:`) | Typed reference to another document type | `type: ref`, `to: Category` |
+| `object` (with `fields:`) | Nested object (one level deep) | `type: object`, `fields: {street: string}` |
 
 **Modifiers:**
 
@@ -834,7 +836,7 @@ Entry:
       items: string
 ```
 
-Supported field types: `string`, `int`, `float`, `bool`, `date`, `datetime`, `enum`, `array`.
+Supported field types: `string`, `int`, `float`, `bool`, `date`, `datetime`, `enum`, `array`, `ref`, `object`.
 
 ### 5.4 Writing Data Files
 
@@ -853,7 +855,7 @@ Hiked the coastal trail at sunrise. The fog was rolling in
 over the cliffs and it felt like walking through clouds.
 ```
 
-The `type` field links the document to its schema definition. Filename is up to you — dates, slugs, UUIDs all work.
+The `type` field links the document to its schema definition. Documents MAY also include an `id` field as a stable unique identifier within the type — if present, `id` takes priority over the filename for reference resolution (see the spec for details). Filename is up to you — dates, slugs, UUIDs all work.
 
 ### 5.5 Creating a Store
 
