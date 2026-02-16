@@ -124,6 +124,20 @@ Agent checks file modification time before writing. If changed since last read, 
 
 ---
 
+## Production Hardening
+
+**WAL Mode.** SQLite's Write-Ahead Logging is enabled by default. Multiple processes (app + agents + scripts) can read and write the index concurrently without coordination.
+
+**Batch Indexing.** `rebuildIndex()` and `incrementalSync()` parse all files first (no DB lock held), then write everything in a single GRDB transaction. Atomic — if anything fails, the whole batch rolls back cleanly.
+
+**Corrupted File Resilience.** Malformed YAML frontmatter doesn't crash the indexer. Bad files are logged (`[AppMDKit WARNING]`) and skipped. Other files continue indexing normally.
+
+**SQL Reserved Word Safety.** All table names are backtick-quoted in generated queries. Schema types named `Order`, `Column`, `Group`, etc. work without issues.
+
+**Position Rebalancing.** Float-based drag-and-drop ordering degrades over time (IEEE 754 precision collapse from repeated midpoint insertions). Built-in `rebalancePositions()` and `needsRebalancing()` detect fragmentation and reassign clean integers.
+
+---
+
 ## The Overengineering Trap
 
 The deep think doc was valuable as a stress test but wrong as a build plan. It imagined every edge case and designed for all of them simultaneously. That's how you turn a 4-week build into a 6-month project that never ships.

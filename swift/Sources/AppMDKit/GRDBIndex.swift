@@ -39,9 +39,13 @@ public final class AppMDIndex: @unchecked Sendable {
         self.cacheURL = cacheDir
         try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
 
-        // Create GRDB database
+        // Create GRDB database with WAL mode for concurrent read/write safety
         let dbPath = cacheDir.appendingPathComponent("index.sqlite").path
-        self.dbQueue = try DatabaseQueue(path: dbPath)
+        var config = Configuration()
+        config.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA journal_mode=WAL")
+        }
+        self.dbQueue = try DatabaseQueue(path: dbPath, configuration: config)
 
         // Create tables from schema
         try createTables()
@@ -112,6 +116,7 @@ public final class AppMDIndex: @unchecked Sendable {
     // MARK: - Full Index Rebuild
 
     /// Perform a full scan of all .md files and rebuild the index.
+    /// Uses a single GRDB transaction for all files (batch indexing).
     public func rebuildIndex() throws {
         let fm = FileManager.default
         let enumerator = fm.enumerator(
@@ -133,8 +138,24 @@ public final class AppMDIndex: @unchecked Sendable {
             files.append((url, modified))
         }
 
+        // Batch: parse all files first, then write to DB in a single transaction
+        var parsed: [(AppMDDocument, URL, Date, String)] = [] // (doc, url, modified, hash)
         for (fileURL, modified) in files {
-            try indexFile(at: fileURL, modified: modified)
+            do {
+                let document = try FileEngine.parse(fileAt: fileURL)
+                let contentData = try Data(contentsOf: fileURL)
+                let hash = FileEngine.sha256(contentData)
+                parsed.append((document, fileURL, modified, hash))
+            } catch {
+                FileEngine.logWarning("Skipping file \(fileURL.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+
+        try dbQueue.write { db in
+            for (document, fileURL, modified, hash) in parsed {
+                let relativePath = self.relativePath(for: fileURL)
+                try self.insertFileRecord(db: db, document: document, relativePath: relativePath, modified: modified, hash: hash)
+            }
         }
 
         // Remove stale entries for files that no longer exist on disk
@@ -144,6 +165,7 @@ public final class AppMDIndex: @unchecked Sendable {
     // MARK: - Incremental Index
 
     /// Re-index only files that have been modified since last index.
+    /// Uses a single GRDB transaction for all changed files (batch indexing).
     public func incrementalSync() throws {
         let fm = FileManager.default
         let enumerator = fm.enumerator(
@@ -151,6 +173,9 @@ public final class AppMDIndex: @unchecked Sendable {
             includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
             options: [.skipsHiddenFiles]
         )
+
+        // First pass: collect files that need re-indexing (read transaction)
+        var filesToIndex: [(URL, Date)] = []
 
         while let url = enumerator?.nextObject() as? URL {
             guard url.pathExtension == "md" else { continue }
@@ -170,7 +195,30 @@ public final class AppMDIndex: @unchecked Sendable {
                 continue // Already up to date
             }
 
-            try indexFile(at: url, modified: modified)
+            filesToIndex.append((url, modified))
+        }
+
+        // Second pass: parse all changed files outside the transaction
+        if !filesToIndex.isEmpty {
+            var parsed: [(AppMDDocument, URL, Date, String)] = []
+            for (fileURL, modified) in filesToIndex {
+                do {
+                    let document = try FileEngine.parse(fileAt: fileURL)
+                    let contentData = try Data(contentsOf: fileURL)
+                    let hash = FileEngine.sha256(contentData)
+                    parsed.append((document, fileURL, modified, hash))
+                } catch {
+                    FileEngine.logWarning("Skipping file \(fileURL.lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+
+            // Single write transaction for all changed files
+            try dbQueue.write { db in
+                for (document, fileURL, modified, hash) in parsed {
+                    let relativePath = self.relativePath(for: fileURL)
+                    try self.insertFileRecord(db: db, document: document, relativePath: relativePath, modified: modified, hash: hash)
+                }
+            }
         }
 
         // Clean up deleted files
@@ -179,9 +227,15 @@ public final class AppMDIndex: @unchecked Sendable {
 
     // MARK: - Index Single File
 
-    /// Parse and index a single file.
+    /// Parse and index a single file (opens its own transaction).
     public func indexFile(at url: URL, modified: Date? = nil) throws {
-        let document = try FileEngine.parse(fileAt: url)
+        let document: AppMDDocument
+        do {
+            document = try FileEngine.parse(fileAt: url)
+        } catch {
+            FileEngine.logWarning("Skipping file \(url.lastPathComponent): \(error.localizedDescription)")
+            return
+        }
         let relativePath = self.relativePath(for: url)
 
         let mod: Date
@@ -196,55 +250,61 @@ public final class AppMDIndex: @unchecked Sendable {
         let hash = FileEngine.sha256(contentData)
 
         try dbQueue.write { db in
-            // Update _files table
-            try db.execute(
-                sql: "INSERT OR REPLACE INTO _files (path, type, modified, hash) VALUES (?, ?, ?, ?)",
-                arguments: [relativePath, document.type, mod.timeIntervalSince1970, hash]
-            )
+            try self.insertFileRecord(db: db, document: document, relativePath: relativePath, modified: mod, hash: hash)
+        }
+    }
 
-            // Insert into type-specific table
-            if let typeName = document.type, let typeDef = schema.types[typeName] {
-                let table = tableName(for: typeName)
+    /// Insert/update a file record within an existing database transaction.
+    /// Shared by `indexFile`, `rebuildIndex`, and `incrementalSync` for batch operations.
+    func insertFileRecord(db: Database, document: AppMDDocument, relativePath: String, modified: Date, hash: String) throws {
+        // Update _files table
+        try db.execute(
+            sql: "INSERT OR REPLACE INTO _files (path, type, modified, hash) VALUES (?, ?, ?, ?)",
+            arguments: [relativePath, document.type, modified.timeIntervalSince1970, hash]
+        )
 
-                // Build column names and values
-                var columns = ["_path", "_modified", "_body"]
-                var placeholders = ["?", "?", "?"]
-                var values: [DatabaseValueConvertible?] = [
-                    relativePath,
-                    mod.timeIntervalSince1970,
-                    document.body.trimmingCharacters(in: .whitespacesAndNewlines)
-                ]
+        // Insert into type-specific table
+        if let typeName = document.type, let typeDef = schema.types[typeName] {
+            let table = tableName(for: typeName)
 
-                for field in typeDef.fields {
-                    if field.type == .text { continue } // body is already handled
+            // Build column names and values
+            var columns = ["_path", "_modified", "_body"]
+            var placeholders = ["?", "?", "?"]
+            var values: [DatabaseValueConvertible?] = [
+                relativePath,
+                modified.timeIntervalSince1970,
+                document.body.trimmingCharacters(in: .whitespacesAndNewlines)
+            ]
 
-                    columns.append(field.name)
-                    placeholders.append("?")
+            for field in typeDef.fields {
+                if field.type == .text { continue } // body is already handled
 
-                    if let value = document.frontmatter[field.name] {
-                        values.append(fieldToDBValue(value, type: field.type))
-                    } else if let defaultValue = field.defaultValue {
-                        values.append(defaultValue)
-                    } else {
-                        values.append(nil as String?)
-                    }
+                columns.append(field.name)
+                placeholders.append("?")
+
+                if let value = document.frontmatter[field.name] {
+                    values.append(fieldToDBValue(value, type: field.type))
+                } else if let defaultValue = field.defaultValue {
+                    values.append(defaultValue)
+                } else {
+                    values.append(nil as String?)
                 }
-
-                let sql = "INSERT OR REPLACE INTO \(table) (\(columns.joined(separator: ", "))) VALUES (\(placeholders.joined(separator: ", ")))"
-                try db.execute(sql: sql, arguments: StatementArguments(values))
             }
 
-            // Update FTS index — contentless FTS5 tables don't support REPLACE,
-            // so we delete first then insert
-            try db.execute(
-                sql: "DELETE FROM _fts WHERE path = ?",
-                arguments: [relativePath]
-            )
-            try db.execute(
-                sql: "INSERT INTO _fts (path, type, body) VALUES (?, ?, ?)",
-                arguments: [relativePath, document.type, document.body]
-            )
+            let sql = "INSERT OR REPLACE INTO `\(table)` (\(columns.joined(separator: ", "))) VALUES (\(placeholders.joined(separator: ", ")))"
+            try db.execute(sql: sql, arguments: StatementArguments(values))
         }
+
+        // Update FTS index — contentless FTS5 tables don't support REPLACE,
+        // so we delete first then insert
+        try db.execute(
+            sql: "DELETE FROM _fts WHERE path = ?",
+            arguments: [relativePath]
+        )
+        try db.execute(
+            sql: "INSERT INTO _fts (path, type, body) VALUES (?, ?, ?)",
+            arguments: [relativePath, document.type, document.body]
+        )
     }
 
     /// Remove a file from the index.
@@ -261,7 +321,7 @@ public final class AppMDIndex: @unchecked Sendable {
             // Remove from type table
             if let typeName = type {
                 let table = tableName(for: typeName)
-                try db.execute(sql: "DELETE FROM \(table) WHERE _path = ?", arguments: [relativePath])
+                try db.execute(sql: "DELETE FROM `\(table)` WHERE _path = ?", arguments: [relativePath])
             }
 
             // Remove from FTS
@@ -333,6 +393,99 @@ public final class AppMDIndex: @unchecked Sendable {
         let relativePath = self.relativePath(for: url)
         registerWrittenHash(hash, for: relativePath)
         try indexFile(at: url, modified: Date())
+    }
+
+    // MARK: - Position Rebalancing
+
+    /// Rebalance position values for items of a given type, optionally filtered.
+    /// Reassigns positions to clean integers (1.0, 2.0, 3.0, ...) while preserving order.
+    /// - Parameters:
+    ///   - typeName: The schema type to rebalance (e.g., "Card")
+    ///   - positionField: The field name containing the position value (default: "position")
+    ///   - filterField: Optional field to filter by (e.g., "column")
+    ///   - filterValue: Value to match for the filter field
+    /// - Returns: Number of items rebalanced
+    @discardableResult
+    public func rebalancePositions(
+        type typeName: String,
+        positionField: String = "position",
+        filterField: String? = nil,
+        filterValue: String? = nil
+    ) throws -> Int {
+        let table = tableName(for: typeName)
+
+        // Build query to get items sorted by current position
+        var sql = "SELECT _path, \(positionField) FROM `\(table)`"
+        var args: [DatabaseValueConvertible?] = []
+
+        if let filterField = filterField, let filterValue = filterValue {
+            sql += " WHERE \(filterField) = ?"
+            args.append(filterValue)
+        }
+
+        sql += " ORDER BY \(positionField) ASC"
+
+        let rows = try dbQueue.read { db in
+            try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+        }
+
+        guard !rows.isEmpty else { return 0 }
+
+        var count = 0
+        for (i, row) in rows.enumerated() {
+            let path: String = row["_path"]
+            let newPosition = Double(i + 1)
+
+            // Read current position
+            let currentPosition: Double? = row[positionField]
+            if currentPosition == newPosition { continue } // Already clean
+
+            // Read the file, update frontmatter, write back
+            let url = absoluteURL(for: path)
+            var document = try FileEngine.parse(fileAt: url)
+            document.frontmatter[positionField] = newPosition
+            try writeDocument(document, to: url)
+            count += 1
+        }
+
+        return count
+    }
+
+    /// Check if positions in a group are too fragmented and need rebalancing.
+    /// Returns true if any gap between consecutive positions is smaller than `threshold`.
+    public func needsRebalancing(
+        type typeName: String,
+        positionField: String = "position",
+        filterField: String? = nil,
+        filterValue: String? = nil,
+        threshold: Double = 0.001
+    ) throws -> Bool {
+        let table = tableName(for: typeName)
+
+        var sql = "SELECT \(positionField) FROM `\(table)`"
+        var args: [DatabaseValueConvertible?] = []
+
+        if let filterField = filterField, let filterValue = filterValue {
+            sql += " WHERE \(filterField) = ?"
+            args.append(filterValue)
+        }
+
+        sql += " ORDER BY \(positionField) ASC"
+
+        let positions: [Double] = try dbQueue.read { db in
+            try Double.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+        }
+
+        guard positions.count >= 2 else { return false }
+
+        for i in 1..<positions.count {
+            let gap = positions[i] - positions[i - 1]
+            if gap < threshold {
+                return true
+            }
+        }
+
+        return false
     }
 
     // MARK: - Helpers

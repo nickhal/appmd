@@ -2,7 +2,7 @@
 
 **The definitive, self-contained reference for building apps with AppMD.**
 
-*Last updated: 2025-07-28 · AppMD Spec v1.0 · AppMDKit (Swift)*
+*Last updated: 2025-07-28 · AppMD Spec v1.0 · AppMDKit (Swift) · Battle-tested*
 
 ---
 
@@ -282,16 +282,52 @@ After the initial full rebuild, the index uses file modification dates:
 
 Normal launch with 0-3 changed files: ~5ms. Cold rebuild of 365 files (1 year of journal): ~100ms. The index is fast.
 
-### 3.9 Performance Characteristics
+### 3.9 WAL Mode (Concurrent Safety)
 
-| Scenario | Time | Notes |
-|----------|------|-------|
-| Cold index build, 365 files | ~100ms | Read + parse + GRDB batch insert |
-| Cold index build, 1095 files (3 years) | ~300ms | Still invisible to user |
-| Incremental sync, 0-3 changes | ~5ms | Normal app launch |
-| Single file write (atomic) | ~2-4ms | YAML serialize + write + rename + GRDB upsert |
-| Any GRDB query | <1ms | SQLite is fast for these volumes |
-| Disk space, 2 years of journal + budget | ~3MB | Trivial |
+The SQLite index uses WAL (Write-Ahead Logging) journal mode, configured at database creation:
+
+```swift
+var config = Configuration()
+config.prepareDatabase { db in
+    try db.execute(sql: "PRAGMA journal_mode=WAL")
+}
+self.dbQueue = try DatabaseQueue(path: dbPath, configuration: config)
+```
+
+**What this means:** Multiple processes can safely read and write the index simultaneously. Your app, an AI agent, and a CLI script can all hit the same SQLite database without coordination.
+
+### 3.10 Batch Indexing
+
+Both `rebuildIndex()` and `incrementalSync()` use a two-phase approach:
+
+1. **Parse phase** — all `.md` files are read and parsed outside any database transaction
+2. **Write phase** — all parsed records are written in a single GRDB transaction
+
+This is automatic — you don't configure it. If anything fails mid-transaction, the entire batch rolls back cleanly.
+
+### 3.11 Corrupted File Resilience
+
+Malformed YAML frontmatter doesn't crash the indexer. Each file is parsed in a `do/catch` block. Bad files are logged and skipped:
+
+```
+[AppMDKit WARNING] Skipping file broken.md: Could not parse YAML frontmatter
+```
+
+Every other file continues indexing normally. This applies to `rebuildIndex()`, `incrementalSync()`, and `indexFile(at:)`.
+
+### 3.12 SQL Reserved Word Safety
+
+All GRDB table names are backtick-quoted in generated SQL. Schema types named `Column`, `Order`, `Group`, `Index`, or any other SQL reserved word work without issues.
+
+### 3.13 Performance Characteristics
+
+For personal-scale data (hundreds to low thousands of files), everything is fast:
+
+- **Cold index rebuild** — scans all files, parses YAML, populates GRDB in a single transaction. Imperceptible for typical app sizes.
+- **Incremental sync** — only re-parses files modified since last index. Normal app launch touches 0–3 files.
+- **Queries** — sub-millisecond. SQLite is absurdly fast for these volumes.
+- **Writes** — YAML serialize + atomic write + GRDB upsert, a few milliseconds per file.
+- **Disk** — years of app data in single-digit megabytes.
 
 ---
 
@@ -569,6 +605,29 @@ public final class AppMDIndex: @unchecked Sendable {
     /// Write a document and update the index. Handles atomic write + hash tracking.
     public func writeDocument(_ document: AppMDDocument, to url: URL) throws
 
+    // --- Position Rebalancing ---
+
+    /// Rebalance position values for items of a given type, optionally filtered.
+    /// Reassigns positions to clean integers (1.0, 2.0, 3.0, ...) while preserving order.
+    /// Returns the number of items rebalanced.
+    @discardableResult
+    public func rebalancePositions(
+        type typeName: String,
+        positionField: String = "position",
+        filterField: String? = nil,
+        filterValue: String? = nil
+    ) throws -> Int
+
+    /// Check if positions in a group are too fragmented and need rebalancing.
+    /// Returns true if any gap between consecutive positions is smaller than `threshold`.
+    public func needsRebalancing(
+        type typeName: String,
+        positionField: String = "position",
+        filterField: String? = nil,
+        filterValue: String? = nil,
+        threshold: Double = 0.001
+    ) throws -> Bool
+
     // --- Path Helpers ---
 
     /// Get relative path of a file URL from the root directory.
@@ -763,6 +822,26 @@ public final class AppMDStore: ObservableObject, @unchecked Sendable {
 
     /// The underlying GRDB database queue for advanced/raw queries.
     public var database: DatabaseQueue { get }
+
+    // --- Position Rebalancing ---
+
+    /// Rebalance position values — reassigns clean integers while preserving order.
+    @discardableResult
+    public func rebalancePositions(
+        type typeName: String,
+        positionField: String = "position",
+        filterField: String? = nil,
+        filterValue: String? = nil
+    ) throws -> Int
+
+    /// Check if positions are too fragmented and need rebalancing.
+    public func needsRebalancing(
+        type typeName: String,
+        positionField: String = "position",
+        filterField: String? = nil,
+        filterValue: String? = nil,
+        threshold: Double = 0.001
+    ) throws -> Bool
 
     // --- Re-index ---
     public func rebuildIndex() throws
@@ -1144,7 +1223,37 @@ AppMDDocument(frontmatter: frontmatter, body: "\n" + body + "\n")
 
 This ensures the serialized file has a blank line between the closing `---` and the body content, which is standard markdown formatting.
 
-### 6.14 Importing GRDB in App Code
+### 6.14 Position Rebalancing (Float Ordering)
+
+**The problem:** Drag-and-drop ordering uses float positions. Insert between items A (position 1.0) and B (position 2.0) → new item gets position 1.5. Keep inserting: 1.25, 1.125, 1.0625... Eventually IEEE 754 doubles lose precision and positions collapse.
+
+**The fix:** AppMDKit provides two methods:
+
+```swift
+// Detect fragmentation — returns true if any gap < threshold
+let needsIt = try store.needsRebalancing(
+    type: "Card",
+    positionField: "position",
+    filterField: "column",
+    filterValue: "todo",
+    threshold: 0.001  // default
+)
+
+// Reassign clean integers (1.0, 2.0, 3.0, ...) preserving order
+let count = try store.rebalancePositions(
+    type: "Card",
+    positionField: "position",
+    filterField: "column",
+    filterValue: "todo"
+)
+// count = number of files actually updated (skips already-clean positions)
+```
+
+**How it works:** Reads all items sorted by current position, then writes back with positions 1.0, 2.0, 3.0, etc. Each file is atomically rewritten with the updated frontmatter. The index updates accordingly.
+
+**When to call it:** After drag-and-drop operations, check `needsRebalancing()`. If true, call `rebalancePositions()`. Or call it periodically (e.g., on app launch). It's fast — only touches files whose positions actually change.
+
+### 6.15 Importing GRDB in App Code
 
 Your app needs to `import GRDB` directly (in addition to `import AppMDKit`) to work with `Row`, `ValueObservation`, `AnyDatabaseCancellable`, and other GRDB types. Add GRDB as a direct dependency of your app target, or access it transitively through AppMDKit.
 

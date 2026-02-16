@@ -233,6 +233,13 @@ public enum FileEngine {
         return true
     }
 
+    // MARK: - Logging
+
+    /// Log a warning to stderr. Used for non-fatal issues like corrupted files.
+    public static func logWarning(_ message: String) {
+        FileHandle.standardError.write(Data("[AppMDKit WARNING] \(message)\n".utf8))
+    }
+
     // MARK: - Hashing
 
     /// Compute SHA256 hash of data, returned as hex string.

@@ -104,7 +104,7 @@ public struct AppMDQuery {
 
     /// Build the SQL query and arguments.
     public func buildSQL() -> (String, StatementArguments) {
-        var sql = "SELECT * FROM \(tableName)"
+        var sql = "SELECT * FROM `\(tableName)`"
         var args: [DatabaseValueConvertible?] = []
 
         if !conditions.isEmpty {
@@ -153,7 +153,7 @@ public struct AppMDQuery {
 
     /// Execute the query and return the count.
     public func count(from db: Database) throws -> Int {
-        var sql = "SELECT COUNT(*) FROM \(tableName)"
+        var sql = "SELECT COUNT(*) FROM `\(tableName)`"
         var args: [DatabaseValueConvertible?] = []
 
         if !conditions.isEmpty {

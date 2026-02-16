@@ -165,6 +165,49 @@ public final class AppMDStore: ObservableObject, @unchecked Sendable {
         index.dbQueue
     }
 
+    // MARK: - Position Rebalancing
+
+    /// Rebalance position values for items of a given type, optionally filtered.
+    /// Reassigns positions to clean integers (1.0, 2.0, 3.0, ...) while preserving order.
+    @discardableResult
+    public func rebalancePositions(
+        type typeName: String,
+        positionField: String = "position",
+        filterField: String? = nil,
+        filterValue: String? = nil
+    ) throws -> Int {
+        let count = try index.rebalancePositions(
+            type: typeName,
+            positionField: positionField,
+            filterField: filterField,
+            filterValue: filterValue
+        )
+        if count > 0 {
+            DispatchQueue.main.async {
+                self.lastChangeDate = Date()
+                self.objectWillChange.send()
+            }
+        }
+        return count
+    }
+
+    /// Check if positions in a group are too fragmented and need rebalancing.
+    public func needsRebalancing(
+        type typeName: String,
+        positionField: String = "position",
+        filterField: String? = nil,
+        filterValue: String? = nil,
+        threshold: Double = 0.001
+    ) throws -> Bool {
+        try index.needsRebalancing(
+            type: typeName,
+            positionField: positionField,
+            filterField: filterField,
+            filterValue: filterValue,
+            threshold: threshold
+        )
+    }
+
     // MARK: - Re-index
 
     /// Force a full re-index from files.
