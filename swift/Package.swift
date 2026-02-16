@@ -12,6 +12,10 @@ let package = Package(
             name: "AppMDKit",
             targets: ["AppMDKit"]
         ),
+        .plugin(
+            name: "AppMDPlugin",
+            targets: ["AppMDPlugin"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
@@ -28,6 +32,20 @@ let package = Package(
         .testTarget(
             name: "AppMDKitTests",
             dependencies: ["AppMDKit"]
+        ),
+
+        // Build plugin: generates AppMDModel conformance from _schema.yaml
+        .plugin(
+            name: "AppMDPlugin",
+            capability: .buildTool(),
+            dependencies: ["appmd-codegen"],
+            path: "Plugins/AppMDPlugin"
+        ),
+
+        // Code generator executable (invoked by the plugin)
+        .executableTarget(
+            name: "appmd-codegen",
+            path: "Sources/AppMDCodeGen"
         ),
     ]
 )
