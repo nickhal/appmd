@@ -173,9 +173,157 @@ public struct AppMDQuery {
     }
 }
 
-// MARK: - Reactive Observation
+// MARK: - Typed Query Builder
+
+/// A typed query builder that returns `AppMDModel` conforming types
+/// instead of raw `Row` objects.
+///
+/// ```swift
+/// let cards: [Card] = try store.fetch(
+///     TypedQuery<Card>()
+///         .where("column", equals: "[[columns/todo]]")
+///         .sort(by: "position")
+/// )
+/// ```
+public struct TypedQuery<T: AppMDModel> {
+    private var inner: AppMDQuery
+
+    public init() {
+        self.inner = AppMDQuery(type: T.typeName)
+    }
+
+    // MARK: - Filtering
+
+    public func `where`(_ column: String, equals value: DatabaseValueConvertible?) -> TypedQuery<T> {
+        var copy = self
+        copy.inner = inner.where(column, equals: value)
+        return copy
+    }
+
+    public func `where`(_ column: String, notEquals value: DatabaseValueConvertible?) -> TypedQuery<T> {
+        var copy = self
+        copy.inner = inner.where(column, notEquals: value)
+        return copy
+    }
+
+    public func `where`(_ column: String, lessThan value: DatabaseValueConvertible?) -> TypedQuery<T> {
+        var copy = self
+        copy.inner = inner.where(column, lessThan: value)
+        return copy
+    }
+
+    public func `where`(_ column: String, greaterThan value: DatabaseValueConvertible?) -> TypedQuery<T> {
+        var copy = self
+        copy.inner = inner.where(column, greaterThan: value)
+        return copy
+    }
+
+    public func `where`(_ column: String, like pattern: String) -> TypedQuery<T> {
+        var copy = self
+        copy.inner = inner.where(column, like: pattern)
+        return copy
+    }
+
+    public func `where`(_ column: String, contains value: String) -> TypedQuery<T> {
+        var copy = self
+        copy.inner = inner.where(column, contains: value)
+        return copy
+    }
+
+    /// Filter by a typed Ref value.
+    public func `where`<R: AppMDModel>(_ column: String, equals ref: Ref<R>) -> TypedQuery<T> {
+        var copy = self
+        copy.inner = inner.where(column, equals: ref.wikiLink)
+        return copy
+    }
+
+    public func whereNull(_ column: String) -> TypedQuery<T> {
+        var copy = self
+        copy.inner = inner.whereNull(column)
+        return copy
+    }
+
+    public func whereNotNull(_ column: String) -> TypedQuery<T> {
+        var copy = self
+        copy.inner = inner.whereNotNull(column)
+        return copy
+    }
+
+    // MARK: - Sorting
+
+    public func sort(by column: String, descending: Bool = false) -> TypedQuery<T> {
+        var copy = self
+        copy.inner = inner.sort(by: column, descending: descending)
+        return copy
+    }
+
+    // MARK: - Limiting
+
+    public func limit(_ count: Int) -> TypedQuery<T> {
+        var copy = self
+        copy.inner = inner.limit(count)
+        return copy
+    }
+
+    public func offset(_ count: Int) -> TypedQuery<T> {
+        var copy = self
+        copy.inner = inner.offset(count)
+        return copy
+    }
+
+    // MARK: - Execution
+
+    /// Build the underlying SQL.
+    public func buildSQL() -> (String, StatementArguments) {
+        inner.buildSQL()
+    }
+
+    /// Fetch typed models from a database connection.
+    public func fetch(from db: Database) throws -> [T] {
+        let (sql, args) = buildSQL()
+        return try T.fetchAll(db, sql: sql, arguments: args)
+    }
+
+    /// Fetch typed models from a database queue.
+    public func fetch(from dbQueue: DatabaseQueue) throws -> [T] {
+        try dbQueue.read { db in
+            try fetch(from: db)
+        }
+    }
+
+    /// Fetch a single model.
+    public func fetchOne(from db: Database) throws -> T? {
+        let limited = self.limit(1)
+        let (sql, args) = limited.buildSQL()
+        return try T.fetchOne(db, sql: sql, arguments: args)
+    }
+
+    /// Fetch a single model from a database queue.
+    public func fetchOne(from dbQueue: DatabaseQueue) throws -> T? {
+        try dbQueue.read { db in
+            try fetchOne(from: db)
+        }
+    }
+
+    /// Count matching records.
+    public func count(from db: Database) throws -> Int {
+        try inner.count(from: db)
+    }
+
+    /// Create a GRDB ValueObservation for this query.
+    /// Use with `observation.start(in: db)` for reactive SwiftUI updates.
+    public func observation() -> ValueObservation<ValueReducers.Fetch<[T]>> {
+        let (sql, args) = buildSQL()
+        return ValueObservation.tracking { db in
+            try T.fetchAll(db, sql: sql, arguments: args)
+        }
+    }
+}
+
+// MARK: - Reactive Observation (Legacy)
 
 /// Provides GRDB ValueObservation-based reactive queries for SwiftUI.
+/// Prefer `TypedQuery<T>.observation()` for typed results.
 public struct AppMDObservation {
 
     /// Create a ValueObservation that watches for changes to a query.

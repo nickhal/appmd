@@ -225,6 +225,81 @@ public final class AppMDStore: ObservableObject, @unchecked Sendable {
     }
 }
 
+// MARK: - Typed Model API
+
+public extension AppMDStore {
+
+    /// Create a typed query for a model type.
+    ///
+    /// ```swift
+    /// let cards: [Card] = try store.fetch(
+    ///     store.query(Card.self)
+    ///         .where("column", equals: colRef)
+    ///         .sort(by: "position")
+    /// )
+    /// ```
+    func query<T: AppMDModel>(_ type: T.Type) -> TypedQuery<T> {
+        TypedQuery<T>()
+    }
+
+    /// Fetch all models matching a typed query.
+    func fetch<T: AppMDModel>(_ query: TypedQuery<T>) throws -> [T] {
+        try query.fetch(from: index.dbQueue)
+    }
+
+    /// Fetch a single model matching a typed query.
+    func fetchOne<T: AppMDModel>(_ query: TypedQuery<T>) throws -> T? {
+        try query.fetchOne(from: index.dbQueue)
+    }
+
+    /// Fetch all models of a type.
+    func fetchAll<T: AppMDModel>(_ type: T.Type) throws -> [T] {
+        try TypedQuery<T>().fetch(from: index.dbQueue)
+    }
+
+    /// Fetch a model by its file path.
+    func fetchByPath<T: AppMDModel>(_ type: T.Type, path: String) throws -> T? {
+        try index.dbQueue.read { db in
+            try T.fetchOne(db, sql: "SELECT * FROM `\(T.databaseTableName)` WHERE `_path` = ?", arguments: [path])
+        }
+    }
+
+    /// Save a model back to its markdown file.
+    /// Merges typed fields on top of the original document to preserve unknown keys.
+    func save<T: AppMDModel>(_ model: T) throws {
+        let doc = model.toDocument()
+        try writeDocument(doc, to: model._path)
+    }
+
+    /// Create a reactive observation for a typed query.
+    /// Returns a GRDB `ValueObservation` that can be started for SwiftUI binding.
+    ///
+    /// ```swift
+    /// let observation = store.observe(
+    ///     store.query(Card.self).sort(by: "position")
+    /// )
+    /// cancellable = observation.start(in: store.database, onError: { ... }) { cards in
+    ///     self.cards = cards
+    /// }
+    /// ```
+    func observe<T: AppMDModel>(_ query: TypedQuery<T>) -> ValueObservation<ValueReducers.Fetch<[T]>> {
+        query.observation()
+    }
+
+    /// Create a reactive observation for all models of a type.
+    func observeAll<T: AppMDModel>(
+        _ type: T.Type,
+        sortBy column: String? = nil,
+        descending: Bool = false
+    ) -> ValueObservation<ValueReducers.Fetch<[T]>> {
+        var q = TypedQuery<T>()
+        if let column = column {
+            q = q.sort(by: column, descending: descending)
+        }
+        return q.observation()
+    }
+}
+
 // MARK: - Errors
 
 public enum AppMDStoreError: Error, LocalizedError {
