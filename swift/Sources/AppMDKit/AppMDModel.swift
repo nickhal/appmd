@@ -22,7 +22,7 @@ import GRDB
 ///     var position: Double
 /// }
 /// ```
-public protocol AppMDModel: FetchableRecord, Sendable, Identifiable where ID == String {
+public protocol AppMDModel: FetchableRecord, Sendable, Identifiable, Equatable where ID == String {
 
     /// The schema type name (e.g. "Card", "Entry"). Must match the type
     /// key in `_schema.yaml` and the frontmatter `type:` field.
@@ -61,6 +61,12 @@ public extension AppMDModel {
 
     /// Identity is the file path.
     var id: String { _path }
+
+    /// Default equality: two models are equal if they have the same file path.
+    /// Override in your type if you need value-level equality.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs._path == rhs._path
+    }
 
     /// Builds the final document with `type` injected and unknown keys preserved.
     /// Call this from `toDocument()` implementations instead of building from scratch.
