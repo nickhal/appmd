@@ -286,6 +286,176 @@ public extension AppMDStore {
         query.observation()
     }
 
+    // MARK: - Create
+
+    /// Create a new document of type T with auto-filled defaults from the schema.
+    ///
+    /// Auto-generates a file path from a slug of a provided name/title field plus a random suffix.
+    /// Auto-fills `type`, `created` (if schema has a datetime field named "created"), and
+    /// `position` (max+1 in the group, optionally filtered by a group field).
+    ///
+    /// ```swift
+    /// let card = try store.create(Card.self, fields: [
+    ///     "title": "New Card",
+    ///     "column": "[[columns/todo]]",
+    /// ], directory: "cards")
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - type: The model type to create.
+    ///   - fields: Dictionary of field values to set. Overrides any auto-filled defaults.
+    ///   - directory: Subdirectory to place the file in (e.g. "cards"). Defaults to type name lowercased.
+    ///   - positionGroup: Optional (fieldName, fieldValue) to scope auto-position calculation.
+    /// - Returns: The created model, read back from the index.
+    @discardableResult
+    func create<T: AppMDModel>(
+        _ type: T.Type,
+        fields: [String: Any] = [:],
+        directory: String? = nil,
+        positionGroup: (field: String, value: String)? = nil
+    ) throws -> T {
+        guard let typeDef = schema.types[T.typeName] else {
+            throw AppMDStoreError.typeNotFound(T.typeName)
+        }
+
+        let dir = directory ?? T.typeName.lowercased()
+
+        // Build slug from name/title field
+        let slugSource = (fields["title"] as? String)
+            ?? (fields["name"] as? String)
+            ?? T.typeName
+        let slug = Self.slugify(slugSource)
+        let suffix = String(UUID().uuidString.prefix(6).lowercased())
+        let relativePath = "\(dir)/\(slug)-\(suffix).md"
+
+        // Build frontmatter
+        var fm: [String: Any] = ["type": T.typeName]
+        var body = ""
+
+        for field in typeDef.fields {
+            // If caller provided a value, use it
+            if let provided = fields[field.name] {
+                if field.type == .text {
+                    body = "\(provided)"
+                } else {
+                    fm[field.name] = provided
+                }
+                continue
+            }
+
+            // Auto-fill created datetime
+            if field.name == "created" && (field.type == .datetime || field.type == .date) {
+                fm["created"] = field.type == .datetime
+                    ? AppMDDecode.encodeDate(Date())
+                    : AppMDDecode.encodeDateOnly(Date())
+                continue
+            }
+
+            // Auto-fill position
+            if field.name == "position" && field.type == .number {
+                let maxPos = try autoPosition(
+                    typeName: T.typeName,
+                    groupField: positionGroup?.field,
+                    groupValue: positionGroup?.value
+                )
+                fm["position"] = maxPos
+                continue
+            }
+
+            // Use default value from schema if available
+            if let defaultValue = field.defaultValue {
+                fm[field.name] = defaultValue
+            }
+        }
+
+        let document = AppMDDocument(frontmatter: fm, body: body.isEmpty ? "" : "\n\(body)\n")
+
+        // Write through the store (atomic write + index update)
+        try writeDocument(document, to: relativePath)
+
+        // Read back from index
+        guard let model = try fetchByPath(T.self, path: relativePath) else {
+            throw AppMDStoreError.fileNotFound(relativePath)
+        }
+        return model
+    }
+
+    // MARK: - Relationship Helpers
+
+    /// Batch-resolve an array of refs.
+    func resolveAll<T: AppMDModel>(_ refs: [Ref<T>]) throws -> [T] {
+        guard !refs.isEmpty else { return [] }
+        let paths = refs.map { $0.path }
+        let placeholders = paths.map { _ in "?" }.joined(separator: ", ")
+        let sql = "SELECT * FROM `\(T.databaseTableName)` WHERE `_path` IN (\(placeholders))"
+        return try database.read { db in
+            try T.fetchAll(db, sql: sql, arguments: StatementArguments(paths))
+        }
+    }
+
+    /// Find all children of a given type that reference a parent via a specific field.
+    ///
+    /// ```swift
+    /// let cards = try store.children(Card.self, where: "column", references: column)
+    /// ```
+    func children<Child: AppMDModel, Parent: AppMDModel>(
+        _ childType: Child.Type,
+        where field: String,
+        references parent: Parent
+    ) throws -> [Child] {
+        let ref = Ref<Parent>.to(parent)
+        return try fetch(
+            query(Child.self).where(field, equals: ref.wikiLink)
+        )
+    }
+
+    /// Find all children of a given type that reference a path via a specific field.
+    func children<Child: AppMDModel>(
+        _ childType: Child.Type,
+        where field: String,
+        referencesPath path: String
+    ) throws -> [Child] {
+        var wikiLink = path
+        if !wikiLink.hasPrefix("[[") {
+            if wikiLink.hasSuffix(".md") { wikiLink = String(wikiLink.dropLast(3)) }
+            wikiLink = "[[\(wikiLink)]]"
+        }
+        return try fetch(
+            query(Child.self).where(field, equals: wikiLink)
+        )
+    }
+
+    // MARK: - Private Helpers
+
+    private func autoPosition(
+        typeName: String,
+        groupField: String?,
+        groupValue: String?
+    ) throws -> Double {
+        let table = typeName.lowercased()
+        var sql = "SELECT MAX(position) FROM `\(table)`"
+        var args: [DatabaseValueConvertible?] = []
+        if let gf = groupField, let gv = groupValue {
+            sql += " WHERE `\(gf)` = ?"
+            args.append(gv)
+        }
+        let maxVal = try database.read { db in
+            try Double.fetchOne(db, sql: sql, arguments: StatementArguments(args))
+        }
+        return (maxVal ?? 0) + 1.0
+    }
+
+    private static func slugify(_ input: String) -> String {
+        let lowered = input.lowercased()
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " -"))
+        let filtered = lowered.unicodeScalars.filter { allowed.contains($0) }
+        let str = String(String.UnicodeScalarView(filtered))
+        let slug = str.components(separatedBy: .whitespaces)
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
+        return slug.isEmpty ? "untitled" : String(slug.prefix(50))
+    }
+
     /// Create a reactive observation for all models of a type.
     func observeAll<T: AppMDModel>(
         _ type: T.Type,

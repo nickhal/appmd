@@ -157,6 +157,11 @@ public struct Ref<T: AppMDModel>: Sendable, Equatable, Hashable {
 
     // MARK: - Resolve
 
+    /// Resolve this reference, returning nil if not found instead of throwing.
+    public func resolveOptional(in store: AppMDStore) -> T? {
+        try? resolve(in: store)
+    }
+
     /// Resolve this reference to a typed model by reading from the store.
     public func resolve(in store: AppMDStore) throws -> T {
         let row = try store.database.read { db -> Row in

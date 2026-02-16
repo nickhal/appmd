@@ -20,6 +20,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
     ],
     targets: [
         .target(
@@ -46,6 +47,16 @@ let package = Package(
         .executableTarget(
             name: "appmd-codegen",
             path: "Sources/AppMDCodeGen"
+        ),
+
+        // CLI tool
+        .executableTarget(
+            name: "appmd-cli",
+            dependencies: [
+                "AppMDKit",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "Sources/AppMDCLI"
         ),
     ]
 )
